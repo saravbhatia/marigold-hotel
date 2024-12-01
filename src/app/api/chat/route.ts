@@ -1,36 +1,132 @@
 import { OpenAI } from 'openai';
-import { NextResponse } from 'next/server';
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-const systemPrompt = `You are a customer service agent at the Marigold Hotel in Jaipur, India. 
-You should provide 3 possible response options that a customer service agent could choose from when responding to a guest.
-Each response should be professional, helpful, and reflect the warm hospitality of the Marigold Hotel.
-Format your response as a JSON array of 3 objects, each with a 'text' and 'rating' property.
-The rating should indicate how good this response option is (1-5).`;
+const wsUrl = `wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01&authorization=Bearer ${process.env.OPENAI_API_KEY}&openai-beta=realtime=v1`;
+let ws: WebSocket | null = null;
+let isConnecting = false;
+let messageHandlers: ((event: MessageEvent) => void)[] = [];
 
 export async function POST(req: Request) {
-  try {
-    const { message } = await req.json();
+  const initWebSocket = async () => {
+    if (isConnecting) {
+      // Wait for existing connection attempt
+      await new Promise(resolve => setTimeout(resolve, 100));
+      return initWebSocket();
+    }
 
-    const completion = await openai.chat.completions.create({
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: message }
-      ],
-      model: "gpt-3.5-turbo",
-      temperature: 0.7,
-      response_format: { type: "json_object" }
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      isConnecting = true;
+      ws = new WebSocket(wsUrl);
+
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            ws = null;
+            reject(new Error('Connection timeout'));
+          }, 5000);
+
+          ws!.onopen = () => {
+            clearTimeout(timeout);
+            resolve();
+          };
+
+          ws!.onerror = (error) => {
+            clearTimeout(timeout);
+            ws = null;
+            reject(error);
+          };
+
+          ws!.onmessage = (event) => {
+            messageHandlers.forEach(handler => handler(event));
+          };
+        });
+      } finally {
+        isConnecting = false;
+      }
+    }
+
+    return ws;
+  };
+
+  try {
+    const socket = await initWebSocket();
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      throw new Error('WebSocket not connected');
+    }
+
+    const contentType = req.headers.get('content-type');
+    if (contentType?.includes('application/json')) {
+      const { action } = await req.json();
+      if (action === 'start') {
+        const stream = new TransformStream();
+        const writer = stream.writable.getWriter();
+
+        const handler = (event: MessageEvent) => {
+          const response = JSON.parse(event.data);
+          if (response.type === 'text') {
+            writer.write(response.text).catch(console.error);
+          }
+        };
+        messageHandlers.push(handler);
+
+        socket.send(JSON.stringify({
+          type: 'message',
+          content: 'START_CONVERSATION'
+        }));
+
+        return new Response(stream.readable, {
+          headers: {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+          },
+        });
+      }
+    }
+
+    // Handle audio data
+    const formData = await req.formData();
+    const audioChunk = formData.get('audio');
+
+    if (!(audioChunk instanceof Blob)) {
+      throw new Error('Audio chunk required');
+    }
+
+    const stream = new TransformStream();
+    const writer = stream.writable.getWriter();
+
+    const handler = (event: MessageEvent) => {
+      const response = JSON.parse(event.data);
+      if (response.type === 'text') {
+        writer.write(response.text)
+          .then(() => {
+            writer.close();
+            messageHandlers = messageHandlers.filter(h => h !== handler);
+          })
+          .catch(console.error);
+      }
+    };
+    messageHandlers.push(handler);
+
+    socket.send(JSON.stringify({
+      type: 'audio',
+      data: await audioChunk.arrayBuffer(),
+      format: 'webm',
+    }));
+
+    return new Response(stream.readable, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+      },
     });
 
-    return NextResponse.json(JSON.parse(completion.choices[0].message.content || '{"responses": []}'));
   } catch (error) {
-    console.error('OpenAI API error:', error);
-    return NextResponse.json(
-      { error: 'Failed to generate responses' },
-      { status: 500 }
-    );
+    console.error('API error:', error);
+    return new Response(JSON.stringify({ 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    }), { status: 500 });
   }
 } 

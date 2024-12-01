@@ -33,13 +33,7 @@ export default function CallSimulator({ onCallEnd }: CallSimulatorProps) {
             <h2 className="text-2xl font-bold text-orange-800">Active Call</h2>
             <PhoneIcon className="h-8 w-8 text-green-500 animate-pulse" />
           </div>
-          <Scenario />
-          <button
-            onClick={handleEndCall}
-            className="mt-6 bg-red-500 hover:bg-red-600 text-white px-6 py-3 rounded-full"
-          >
-            End Call
-          </button>
+          <Scenario onCallEnd={handleEndCall} />
         </div>
       ) : (
         <div className="bg-white p-8 rounded-lg shadow-lg text-center">
