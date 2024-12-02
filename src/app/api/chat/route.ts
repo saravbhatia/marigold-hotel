@@ -14,8 +14,22 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'No audio file provided' }, { status: 400 });
     }
 
-    // Convert Blob to File using the built-in File constructor
-    const audioFile = new File([audioBlob], 'audio.webm', { type: 'audio/webm' });
+    console.log('Received audio blob:', {
+      type: audioBlob.type,
+      size: audioBlob.size
+    });
+
+    // Create WAV file
+    const audioFile = new File([audioBlob], 'audio.wav', { 
+      type: 'audio/wav',
+      lastModified: Date.now()
+    });
+
+    console.log('Created audio file:', {
+      name: audioFile.name,
+      type: audioFile.type,
+      size: audioFile.size
+    });
 
     // Convert audio to text using Whisper
     const transcription = await openai.audio.transcriptions.create({
@@ -23,7 +37,9 @@ export async function POST(req: Request) {
       model: 'whisper-1',
     });
 
-    if (!transcription.text) {
+    // Get the text from the transcription response
+    const transcribedText = transcription.text;
+    if (!transcribedText) {
       throw new Error('No transcription text received');
     }
 
@@ -37,7 +53,7 @@ export async function POST(req: Request) {
         },
         {
           role: 'user',
-          content: transcription.text
+          content: transcribedText
         }
       ]
     });
@@ -59,7 +75,7 @@ export async function POST(req: Request) {
     const audioBase64 = audioBuffer.toString('base64');
 
     return NextResponse.json({
-      userMessage: transcription.text,
+      userMessage: transcribedText,
       assistantMessage,
       audioResponse: audioBase64
     });

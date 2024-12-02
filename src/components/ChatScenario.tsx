@@ -13,13 +13,81 @@ export default function ChatScenario({ onCallEnd }: ChatScenarioProps) {
   const [messages, setMessages] = useState<{ role: 'user' | 'assistant', content: string }[]>([]);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
-  const audioRef = useRef<HTMLAudioElement>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
   const silenceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
+  // Initialize audio context on first user interaction
+  useEffect(() => {
+    const initAudioContext = () => {
+      if (!audioContextRef.current) {
+        audioContextRef.current = new AudioContext();
+      }
+    };
+
+    // Add listener for first interaction
+    const handleInteraction = () => {
+      initAudioContext();
+      document.removeEventListener('click', handleInteraction);
+    };
+
+    document.addEventListener('click', handleInteraction);
+    return () => {
+      document.removeEventListener('click', handleInteraction);
+    };
+  }, []);
+
+  const playAudioResponse = async (base64Audio: string) => {
+    try {
+      if (!audioContextRef.current) {
+        audioContextRef.current = new AudioContext();
+      }
+
+      setIsSpeaking(true);
+      const audioContext = audioContextRef.current;
+      
+      // Convert base64 to array buffer
+      const binaryString = atob(base64Audio);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+
+      // Decode audio data
+      const audioBuffer = await audioContext.decodeAudioData(bytes.buffer);
+      const source = audioContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioContext.destination);
+      
+      source.onended = () => {
+        setIsSpeaking(false);
+      };
+
+      source.start(0);
+    } catch (error) {
+      console.error('Error playing audio response:', error);
+      setIsSpeaking(false);
+    }
+  };
+
   const startListening = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+      
+      // Resume audio context if it exists
+      if (audioContextRef.current) {
+        await audioContextRef.current.resume();
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          sampleRate: 44100,  // Standard WAV sample rate
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        } 
+      });
       streamRef.current = stream;
       
       const mediaRecorder = new MediaRecorder(stream);
@@ -28,17 +96,26 @@ export default function ChatScenario({ onCallEnd }: ChatScenarioProps) {
 
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
+          console.log('Received audio chunk:', {
+            size: event.data.size,
+            type: event.data.type
+          });
           chunksRef.current.push(event.data);
         }
       };
 
       mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(chunksRef.current, { type: 'audio/webm' });
+        console.log('MediaRecorder stopped, processing chunks:', chunksRef.current.length);
+        const audioBlob = new Blob(chunksRef.current, { type: 'audio/wav' });
+        console.log('Created audio blob:', {
+          size: audioBlob.size,
+          type: audioBlob.type
+        });
         const formData = new FormData();
         formData.append('audio', audioBlob);
 
         try {
-          setIsProcessing(true);  // Start processing animation
+          setIsProcessing(true);
           const response = await fetch('/api/chat', {
             method: 'POST',
             body: formData,
@@ -50,35 +127,33 @@ export default function ChatScenario({ onCallEnd }: ChatScenarioProps) {
 
           const data = await response.json();
           
-          // Add user's transcribed message
           if (data.userMessage) {
             setMessages(prev => [...prev, { role: 'user', content: data.userMessage }]);
           }
 
-          // Add assistant's response and play audio
           if (data.assistantMessage) {
             setMessages(prev => [...prev, { role: 'assistant', content: data.assistantMessage }]);
             if (data.audioResponse) {
-              setIsSpeaking(true);
-              const audio = new Audio(`data:audio/mp3;base64,${data.audioResponse}`);
-              audio.onended = () => setIsSpeaking(false);
-              await audio.play();
+              await playAudioResponse(data.audioResponse);
             }
           }
         } catch (error) {
           console.error('Error processing audio:', error);
         } finally {
-          setIsProcessing(false);  // Stop processing animation
+          setIsProcessing(false);
         }
       };
 
-      mediaRecorder.start();
+      // Start recording with timeslice for all browsers
+      mediaRecorder.start(1000); // 1-second chunks for all browsers
       setIsListening(true);
 
       // Set up silence detection
-      const audioContext = new AudioContext();
-      const analyser = audioContext.createAnalyser();
-      const source = audioContext.createMediaStreamSource(stream);
+      if (!audioContextRef.current) {
+        audioContextRef.current = new AudioContext();
+      }
+      const analyser = audioContextRef.current.createAnalyser();
+      const source = audioContextRef.current.createMediaStreamSource(stream);
       source.connect(analyser);
       
       analyser.fftSize = 2048;
@@ -194,8 +269,8 @@ export default function ChatScenario({ onCallEnd }: ChatScenarioProps) {
 
           {/* Speaking Animation */}
           {isSpeaking && (
-            <div className="absolute -bottom-8 left-1/2 transform -translate-x-1/2">
-              <div className="flex gap-1">
+            <div className="absolute -bottom-8 left-1/2 transform -translate-x-1/2 flex flex-col items-center">
+              <div className="flex items-center gap-1">
                 {[...Array(5)].map((_, i) => (
                   <div
                     key={i}
@@ -208,7 +283,7 @@ export default function ChatScenario({ onCallEnd }: ChatScenarioProps) {
                   />
                 ))}
               </div>
-              <p className="text-sm text-gray-500 mt-2 text-center">Speaking...</p>
+              <p className="text-sm text-gray-500 mt-2">Speaking...</p>
             </div>
           )}
         </div>
