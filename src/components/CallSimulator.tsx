@@ -4,12 +4,14 @@ import { useState } from 'react';
 import { motion } from 'framer-motion';
 import { PhoneIcon, StarIcon } from '@heroicons/react/24/solid';
 import Scenario from '@/components/Scenario';
+import ChatScenario from '@/components/ChatScenario';
 
 interface CallSimulatorProps {
   onCallEnd: () => void;
+  callType: 'realtime' | 'chat';
 }
 
-export default function CallSimulator({ onCallEnd }: CallSimulatorProps) {
+export default function CallSimulator({ onCallEnd, callType }: CallSimulatorProps) {
   const [isCallEnded, setIsCallEnded] = useState(false);
   const [customerRating, setCustomerRating] = useState(0);
   const [businessRating, setBusinessRating] = useState(0);
@@ -28,13 +30,11 @@ export default function CallSimulator({ onCallEnd }: CallSimulatorProps) {
       className="max-w-4xl mx-auto"
     >
       {!isCallEnded ? (
-        <div className="bg-white p-8 rounded-lg shadow-lg">
-          <div className="flex items-center justify-between mb-6">
-            <h2 className="text-2xl font-bold text-orange-800">Active Call</h2>
-            <PhoneIcon className="h-8 w-8 text-green-500 animate-pulse" />
-          </div>
+        callType === 'realtime' ? (
           <Scenario onCallEnd={handleEndCall} />
-        </div>
+        ) : (
+          <ChatScenario onCallEnd={handleEndCall} />
+        )
       ) : (
         <div className="bg-white p-8 rounded-lg shadow-lg text-center">
           <h2 className="text-2xl font-bold text-orange-800 mb-6">Call Complete</h2>

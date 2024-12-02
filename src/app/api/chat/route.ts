@@ -1,132 +1,74 @@
-import { OpenAI } from 'openai';
+import { NextResponse } from 'next/server';
+import OpenAI from 'openai';
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-const wsUrl = `wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01&authorization=Bearer ${process.env.OPENAI_API_KEY}&openai-beta=realtime=v1`;
-let ws: WebSocket | null = null;
-let isConnecting = false;
-let messageHandlers: ((event: MessageEvent) => void)[] = [];
-
 export async function POST(req: Request) {
-  const initWebSocket = async () => {
-    if (isConnecting) {
-      // Wait for existing connection attempt
-      await new Promise(resolve => setTimeout(resolve, 100));
-      return initWebSocket();
-    }
-
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      isConnecting = true;
-      ws = new WebSocket(wsUrl);
-
-      try {
-        await new Promise<void>((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            ws = null;
-            reject(new Error('Connection timeout'));
-          }, 5000);
-
-          ws!.onopen = () => {
-            clearTimeout(timeout);
-            resolve();
-          };
-
-          ws!.onerror = (error) => {
-            clearTimeout(timeout);
-            ws = null;
-            reject(error);
-          };
-
-          ws!.onmessage = (event) => {
-            messageHandlers.forEach(handler => handler(event));
-          };
-        });
-      } finally {
-        isConnecting = false;
-      }
-    }
-
-    return ws;
-  };
-
   try {
-    const socket = await initWebSocket();
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      throw new Error('WebSocket not connected');
-    }
-
-    const contentType = req.headers.get('content-type');
-    if (contentType?.includes('application/json')) {
-      const { action } = await req.json();
-      if (action === 'start') {
-        const stream = new TransformStream();
-        const writer = stream.writable.getWriter();
-
-        const handler = (event: MessageEvent) => {
-          const response = JSON.parse(event.data);
-          if (response.type === 'text') {
-            writer.write(response.text).catch(console.error);
-          }
-        };
-        messageHandlers.push(handler);
-
-        socket.send(JSON.stringify({
-          type: 'message',
-          content: 'START_CONVERSATION'
-        }));
-
-        return new Response(stream.readable, {
-          headers: {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-          },
-        });
-      }
-    }
-
-    // Handle audio data
     const formData = await req.formData();
-    const audioChunk = formData.get('audio');
+    const audioBlob = formData.get('audio') as Blob;
 
-    if (!(audioChunk instanceof Blob)) {
-      throw new Error('Audio chunk required');
+    if (!audioBlob) {
+      return NextResponse.json({ error: 'No audio file provided' }, { status: 400 });
     }
 
-    const stream = new TransformStream();
-    const writer = stream.writable.getWriter();
+    // Convert Blob to File using the built-in File constructor
+    const audioFile = new File([audioBlob], 'audio.webm', { type: 'audio/webm' });
 
-    const handler = (event: MessageEvent) => {
-      const response = JSON.parse(event.data);
-      if (response.type === 'text') {
-        writer.write(response.text)
-          .then(() => {
-            writer.close();
-            messageHandlers = messageHandlers.filter(h => h !== handler);
-          })
-          .catch(console.error);
-      }
-    };
-    messageHandlers.push(handler);
+    // Convert audio to text using Whisper
+    const transcription = await openai.audio.transcriptions.create({
+      file: audioFile,
+      model: 'whisper-1',
+    });
 
-    socket.send(JSON.stringify({
-      type: 'audio',
-      data: await audioChunk.arrayBuffer(),
-      format: 'webm',
-    }));
+    if (!transcription.text) {
+      throw new Error('No transcription text received');
+    }
 
-    return new Response(stream.readable, {
-      headers: {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-      },
+    // Get chat completion
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4',
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a Marigold Hotel customer service agent. The Marigold Hotel is a 5-star hotel in Jaipur, India. You are an expert in all things Jaipur. Be concise and direct in your responses. Keep your answers brief but helpful. You have no reservation information and cannot help with booking. Always answer in the language detected in the user\'s message.'
+        },
+        {
+          role: 'user',
+          content: transcription.text
+        }
+      ]
+    });
+
+    const assistantMessage = completion.choices[0].message.content;
+    if (!assistantMessage) {
+      throw new Error('No assistant message received');
+    }
+
+    // Convert response to speech
+    const speechResponse = await openai.audio.speech.create({
+      model: 'tts-1',
+      voice: 'shimmer',
+      input: assistantMessage,
+    });
+
+    // Convert audio to base64
+    const audioBuffer = Buffer.from(await speechResponse.arrayBuffer());
+    const audioBase64 = audioBuffer.toString('base64');
+
+    return NextResponse.json({
+      userMessage: transcription.text,
+      assistantMessage,
+      audioResponse: audioBase64
     });
 
   } catch (error) {
-    console.error('API error:', error);
-    return new Response(JSON.stringify({ 
-      error: error instanceof Error ? error.message : 'Unknown error' 
-    }), { status: 500 });
+    console.error('Error processing request:', error);
+    return NextResponse.json(
+      { error: 'Error processing audio' },
+      { status: 500 }
+    );
   }
 } 
