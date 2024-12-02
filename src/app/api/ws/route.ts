@@ -74,6 +74,11 @@ export async function GET(req: Request) {
           } else if (response.type === 'response.audio.delta' || response.type === 'response.audio.done') {
             // Add response to queue
             responseQueue.push(response);
+          } else if (response.type === 'response.done' && response.response?.status === 'failed') {
+            console.error('OpenAI Response Failed:', {
+              error: response.response.status_details,
+              responseId: response.response.id
+            });
           }
         } catch (error) {
           console.error('Error processing message:', error);
